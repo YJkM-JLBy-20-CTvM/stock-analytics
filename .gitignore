@@ -1,0 +1,10 @@
+# source data and local env
+data/*.duckdb
+data/*.wal
+.venv/
+__pycache__/
+.pytest_cache/
+certs/
+tmp/
+tmp_check.py
+output/
