@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Интерактивный дашборд рынка акций Мосбиржи</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #17202a; --muted: #667085;
+    --line: #e4e7ec; --pos: #12805c; --neg: #c0392b; --accent: #2b6cb0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151a; --card: #1a1f27; --ink: #e6e9ef; --muted: #98a2b3; --line: #2a313c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px 18px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 22px; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 12.5px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px; }
+  .toolbar label { color: var(--muted); font-size: 13px; }
+  select, input[type="search"] {
+    background: transparent; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; font: inherit;
+  }
+  input[type="search"] { min-width: 200px; }
+  canvas { width: 100%; height: 320px; display: block; }
+  .tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg);
+         padding: 4px 8px; border-radius: 6px; font-size: 12.5px; opacity: 0; transition: opacity .12s; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab { border: 1px solid var(--line); background: transparent; color: var(--muted);
+         border-radius: 999px; padding: 4px 12px; font: inherit; cursor: pointer; }
+  .tab[aria-pressed="true"] { color: var(--ink); border-color: var(--accent); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--muted); font-weight: 600; cursor: pointer; white-space: nowrap; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+  .scroll { max-height: 520px; overflow: auto; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+  .err { color: var(--neg); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Рынок акций Мосбиржи</h1>
+  <div class="sub" id="period">Загрузка данных…</div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section class="panel">
+    <div class="tabs" id="chart-tabs">
+      <button class="tab" data-chart="nav" aria-pressed="true">1 ₽ в начале периода</button>
+      <button class="tab" data-chart="vol">Недельная волатильность рынка</button>
+      <button class="tab" data-chart="turnover">Оборот, млрд ₽/день</button>
+    </div>
+    <div class="toolbar" id="nav-controls">
+      <label>Бумаги:
+        <select id="tickers" multiple size="1"></select>
+      </label>
+      <span class="note" id="nav-hint">Выберите до 8 бумаг, пунктиром — IMOEX.</span>
+    </div>
+    <canvas id="chart" width="1100" height="320"></canvas>
+    <p class="note" id="chart-note"></p>
+  </section>
+
+  <section class="panel">
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Поиск по тикеру или названию">
+      <label>Сортировка: <select id="sort">
+        <option value="turnover">Оборот</option>
+        <option value="volatility">Волатильность</option>
+        <option value="drawdown">Просадка</option>
+        <option value="beta">Бета</option>
+        <option value="return_total">Доходность</option>
+        <option value="range">Размах цены</option>
+      </select></label>
+      <span class="note" id="count"></span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th data-sort="ticker">Тикер</th><th>Название</th>
+          <th class="num" data-sort="days">Дней</th>
+          <th class="num" data-sort="return_total">Доходность</th>
+          <th class="num" data-sort="volatility">Волат.</th>
+          <th class="num" data-sort="drawdown">Макс. просадка</th>
+          <th class="num" data-sort="beta">Бета</th>
+          <th class="num" data-sort="range">Размах</th>
+          <th class="num" data-sort="turnover">Оборот/день</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="note">Данные считаются в браузере из <code>prices.csv</code>: доходность — по первой и последней реальной цене,
+      волатильность — σ дневных доходностей × √252, просадка — от локального максимума, бета — к дневным доходностям IMOEX
+      по общим торговым дням, размах — (макс/мин − 1). Только ценовая доходность, без дивидендов.</p>
+  </section>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+const state = {
+  securities: new Map(),   // ticker -> {short_name}
+  closes: new Map(),       // ticker -> [[date, close], ...]
+  index: [],               // [[date, close], ...]
+  stats: [],
+  chart: "nav",
+  selected: ["SBER", "GAZP", "LKOH", "MOEX", "VTBR", "GMKN"],
+  search: "",
+  sort: "turnover"
+};
+
+const $ = (id) => document.getElementById(id);
+const fmtPct = (v) => (v === null || Number.isNaN(v)) ? "—" :
+  ((Math.abs(v) < 5e-4 ? 0 : v) >= 0 ? "+" : (Math.abs(v) < 5e-4 ? "" : "")) + (v * 100).toFixed(1) + "%";
+const fmtPctPlain = (v) => (v === null || Number.isNaN(v)) ? "—" : (v * 100).toFixed(1) + "%";
+const fmtMoney = (v) => v === null || Number.isNaN(v) ? "—" :
+  (v / 1e6).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " млн";
+const fmtNum = (v, d = 2) => v === null || Number.isNaN(v) ? "—" : v.toFixed(d);
+
+function parseCsv(text) {
+  const lines = text.replace(/\r/g, "").trim().split("\n");
+  const head = lines[0].split(",");
+  return lines.slice(1).map((line) => {
+    const parts = line.split(",");
+    const row = {};
+    head.forEach((h, i) => { row[h] = parts[i]; });
+    return row;
+  });
+}
+
+async function loadCsv(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return parseCsv(await res.text());
+}
+
+function dailyReturns(series) {
+  const out = [];
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1][1], cur = series[i][1];
+    if (prev > 0 && cur > 0) out.push([series[i][0], cur / prev - 1]);
+  }
+  return out;
+}
+
+function buildStats() {
+  const indexByDate = new Map(state.index.map(([d, c]) => [d, c]));
+  const indexRet = new Map();
+  const idxRetArr = dailyReturns(state.index);
+  idxRetArr.forEach(([d, r]) => indexRet.set(d, r));
+  const benchVals = idxRetArr.map(([, r]) => r);
+  const benchMean = benchVals.reduce((a, b) => a + b, 0) / benchVals.length;
+  const benchVar = benchVals.reduce((a, b) => a + (b - benchMean) ** 2, 0) / (benchVals.length - 1);
+
+  const stats = [];
+  for (const [ticker, series] of state.closes) {
+    if (series.length < 2) continue;
+    const first = series[0][1], last = series[series.length - 1][1];
+    const total = last / first - 1;
+    const rets = dailyReturns(series);
+    const mean = rets.reduce((a, [, r]) => a + r, 0) / rets.length;
+    const variance = rets.reduce((a, [, r]) => a + (r - mean) ** 2, 0) / Math.max(1, rets.length - 1);
+    const vol = Math.sqrt(variance) * Math.sqrt(252);
+
+    let peak = -Infinity, dd = 0, hi = -Infinity, lo = Infinity;
+    for (const [, c] of series) {
+      peak = Math.max(peak, c);
+      dd = Math.min(dd, c / peak - 1);
+      hi = Math.max(hi, c); lo = Math.min(lo, c);
+    }
+
+    // бета и корреляция — только по общим торговым дням
+    const pairs = rets.filter(([d]) => indexRet.has(d));
+    let beta = null;
+    if (pairs.length > 2 && benchVar > 0) {
+      const pairsMean = pairs.reduce((a, [, r]) => a + r, 0) / pairs.length;
+      let cov = 0;
+      for (const [d, r] of pairs) cov += (r - pairsMean) * (indexRet.get(d) - benchMean);
+      beta = cov / (pairs.length - 1) / benchVar;
+    }
+
+    const turnoverRows = series.length;
+    stats.push({
+      ticker,
+      name: (state.securities.get(ticker) || {}).short_name || "",
+      days: series.length,
+      first_date: series[0][0],
+      last_date: series[series.length - 1][0],
+      return_total: total,
+      volatility: vol,
+      drawdown: dd,
+      beta,
+      range: lo > 0 ? hi / lo - 1 : null,
+      turnover: state.turnover.get(ticker) || null,
+      shares: turnoverRows
+    });
+  }
+  return stats;
+}
+
+function renderKpis() {
+  const idxFirst = state.index[0][1], idxLast = state.index[state.index.length - 1][1];
+  const idxRet = idxLast / idxFirst - 1;
+  const comparable = state.stats.filter((s) => s.days >= 60);
+  const avg = comparable.length ? comparable.reduce((a, s) => a + s.return_total, 0) / comparable.length : null;
+  const above = comparable.filter((s) => s.return_total > idxRet).length;
+  const ddVals = comparable.map((s) => s.drawdown).sort((a, b) => a - b);
+  const medianDd = ddVals.length ? ddVals[Math.floor(ddVals.length / 2)] : null;
+  const swing = Math.max(...state.index.map(([, c]) => c)) / Math.min(...state.index.map(([, c]) => c)) - 1;
+
+  const kpis = [
+    [fmtPct(idxRet), "IMOEX за период", idxRet],
+    [fmtPct(avg), "средняя доходность (≥60 дней)", avg],
+    [String(above), `бумаг обогнали IMOEX из ${comparable.length}`, null],
+    [fmtPctPlain(medianDd), "медианная макс. просадка", medianDd],
+    [fmtPctPlain(swing), "размах IMOEX", null]
+  ];
+  $("kpis").innerHTML = kpis.map(([v, l, sign]) => {
+    const cls = sign === null ? "" : (sign >= 0 ? " pos" : " neg");
+    return `<div class="kpi"><div class="v${cls}">${v}</div><div class="l">${l}</div></div>`;
+  }).join("");
+}
+
+function renderTable() {
+  const q = state.search.trim().toUpperCase();
+  let rows = state.stats.filter((s) =>
+    !q || s.ticker.includes(q) || (s.name || "").toUpperCase().includes(q));
+  const key = state.sort;
+  rows.sort((a, b) => {
+    const av = a[key] === null || a[key] === undefined ? -Infinity : a[key];
+    const bv = b[key] === null || b[key] === undefined ? -Infinity : b[key];
+    return typeof av === "string" ? av.localeCompare(bv) : bv - av;
+  });
+  $("count").textContent = `${rows.length} из ${state.stats.length} бумаг`;
+  $("rows").innerHTML = rows.map((s) => `
+    <tr>
+      <td>${s.ticker}</td><td>${s.name}</td>
+      <td class="num">${s.days}</td>
+      <td class="num ${s.return_total >= 0 ? "pos" : "neg"}">${fmtPct(s.return_total)}</td>
+      <td class="num">${fmtPctPlain(s.volatility)}</td>
+      <td class="num neg">${fmtPctPlain(s.drawdown)}</td>
+      <td class="num">${fmtNum(s.beta)}</td>
+      <td class="num">${fmtPctPlain(s.range)}</td>
+      <td class="num">${fmtMoney(s.turnover)}</td>
+    </tr>`).join("");
+}
+
+function renderTickSelect() {
+  const options = state.stats
+    .filter((s) => s.days >= 60)
+    .sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
+  $("tickers").innerHTML = options.map((s) =>
+    `<option value="${s.ticker}" ${state.selected.includes(s.ticker) ? "selected" : ""}>${s.ticker} — ${s.name}</option>`
+  ).join("");
+}
+
+// ---------- графики на canvas без библиотек ----------
+
+function setupCanvas() {
+  const canvas = $("chart");
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(320, Math.floor(rect.width * ratio));
+  canvas.height = Math.floor(320 * ratio);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return { ctx, w: canvas.width / ratio, h: canvas.height / ratio };
+}
+
+function niceTicks(min, max, count = 5) {
+  const span = max - min || 1;
+  const step0 = span / count;
+  const mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= step0) || step0;
+  const start = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + 1e-9; v += step) ticks.push(v);
+  return ticks;
+}
+
+function drawSeriesLine(ctx, points, xOf, yOf, color, dash, width) {
+  if (!points.length) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dash || []);
+  points.forEach(([d, v], i) => {
+    const x = xOf(d), y = yOf(v);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawChart() {
+  const { ctx, w, h } = setupCanvas();
+  ctx.clearRect(0, 0, w, h);
+
+  const pad = { l: 56, r: 14, t: 14, b: 26 };
+  ctx.font = "11px -apple-system, Segoe UI, sans-serif";
+  ctx.fillStyle = getComputedStyle(document.body).color;
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--line");
+  ctx.globalAlpha = 0.9;
+
+  let seriesSet = [];
+  let yFormat = (v) => v.toFixed(2);
+  let note = "";
+  let yMin = Infinity, yMax = -Infinity;
+  const dates = state.index.map(([d]) => d);
+
+  if (state.chart === "nav") {
+    const chosen = state.selected.filter((t) => state.closes.has(t));
+    const navOf = (series) => {
+      if (!series.length) return [];
+      const base = series[0][1];
+      return series.map(([d, c]) => [d, c / base]);
+    };
+    seriesSet = chosen.map((t) => ({ ticker: t, name: (state.securities.get(t) || {}).short_name || t, points: navOf(state.closes.get(t)) }));
+    seriesSet.push({ ticker: "IMOEX", name: "IMOEX", points: navOf(state.index), dash: [6, 4] });
+    yFormat = (v) => v.toFixed(2) + " ₽";
+    note = "1 ₽, вложенный в первый торговый день каждой бумаги. Пунктир — индекс IMOEX.";
+  } else if (state.chart === "vol") {
+    const rets = dailyReturns(state.index);
+    const window = 5;
+    const values = [];
+    for (let i = window; i < rets.length; i++) {
+      const chunk = rets.slice(i - window, i).map(([, r]) => r);
+      const mean = chunk.reduce((a, b) => a + b, 0) / chunk.length;
+      const sd = Math.sqrt(chunk.reduce((a, b) => a + (b - mean) ** 2, 0) / (chunk.length - 1));
+      values.push([rets[i][0], sd * Math.sqrt(252)]);
+    }
+    seriesSet = [{ ticker: "IMOEX", name: "недельная волатильность", points: values }];
+    yFormat = (v) => (v * 100).toFixed(0) + "%";
+    note = "Скользящее окно 5 торговых дней, приведённое к году (√252). Показывает, как менялся риск индекса, а не средний уровень.";
+  } else {
+    seriesSet = [{ ticker: "turnover", name: "оборот", points: state.turnoverSeries }];
+    yFormat = (v) => v.toFixed(0);
+    note = "Сумма оборота (VALUE) по бумагам TQBR за торговый день, млрд ₽.";
+  }
+
+  for (const s of seriesSet) {
+    for (const [, v] of s.points) {
+      yMin = Math.min(yMin, v); yMax = Math.max(yMax, v);
+    }
+  }
+  if (!isFinite(yMin) || !isFinite(yMax)) { $("chart-note").textContent = "Нет данных для выбранного графика."; return; }
+  const yPad = (yMax - yMin) * 0.06 || 0.05;
+  yMin -= yPad; yMax += yPad;
+
+  const xOf = (d) => {
+    const i = state.dateIndex.get(d);
+    return pad.l + (i / Math.max(1, state.dateIndex.size - 1)) * (w - pad.l - pad.r);
+  };
+  const yOf = (v) => h - pad.b - ((v - yMin) / (yMax - yMin)) * (h - pad.t - pad.b);
+
+  for (const tick of niceTicks(yMin, yMax)) {
+    const y = yOf(tick);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText(yFormat(tick), 6, y + 4);
+  }
+
+  const monthStep = Math.max(1, Math.ceil(state.monthLabels.length / 7));
+  state.monthLabels.forEach((label, i) => {
+    if (i % monthStep) return;
+    ctx.fillText(label, xOf(label.date), h - 8);
+  });
+
+  const palette = ["#2b6cb0", "#c0392b", "#12805c", "#b7791f", "#6b46c1", "#1d8ea1", "#a0522d", "#7a1f5a", "#444", "#0f766e"];
+  seriesSet.forEach((s, i) => {
+    drawSeriesLine(ctx, s.points, xOf, yOf, s.dash ? "#444" : palette[i % palette.length], s.dash, s.dash ? 1.8 : 1.4);
+  });
+
+  // легенда
+  let lx = pad.l + 4, ly = pad.t + 10;
+  seriesSet.forEach((s, i) => {
+    ctx.fillStyle = s.dash ? "#444" : palette[i % palette.length];
+    const label = s.name.length > 22 ? s.ticker : s.name;
+    ctx.fillRect(lx, ly - 7, 10, 3);
+    ctx.fillStyle = getComputedStyle(document.body).color;
+    ctx.fillText(label, lx + 14, ly);
+    lx += ctx.measureText(label).width + 28;
+    if (lx > w - 120) { lx = pad.l + 4; ly += 14; }
+  });
+
+  $("chart-note").textContent = note;
+}
+
+function rebuildDateIndex() {
+  const dates = new Set(state.index.map(([d]) => d));
+  const sorted = [...dates].sort();
+  state.dateIndex = new Map(sorted.map((d, i) => [d, i]));
+  const byMonth = new Map();
+  for (const d of sorted) {
+    const key = d.slice(0, 7);
+    if (!byMonth.has(key)) byMonth.set(key, d);
+  }
+  state.monthLabels = [...byMonth.entries()].map(([key, date]) => {
+    const [y, m] = key.split("-");
+    return { date, label: new Date(`${y}-${m}-01T00:00:00Z`).toLocaleDateString("ru-RU", { month: "short", year: "2-digit", timeZone: "UTC" }) };
+  });
+}
+
+async function main() {
+  try {
+    const [securities, pricesCsv, indexCsv, navTsv] = await Promise.all([
+      loadCsv("docs/securities.csv").catch(() => loadCsv("securities.csv")),
+      loadCsv("docs/prices.csv").catch(() => loadCsv("prices.csv")),
+      loadCsv("docs/index_prices.csv").catch(() => loadCsv("index_prices.csv")),
+      fetch("docs/nav.tsv").then((r) => r.text()).catch(() => fetch("nav.tsv").then((r) => r.text()))
+    ]);
+
+    for (const s of securities) state.securities.set(s.ticker, s);
+
+    state.turnover = new Map();
+    state.dateSet = new Set();
+    for (const row of pricesCsv) {
+      const close = Number(row.close);
+      if (!row.ticker || !row.trade_date || !Number.isFinite(close) || close <= 0) continue;
+      if (!state.closes.has(row.ticker)) state.closes.set(row.ticker, []);
+      state.closes.get(row.ticker).push([row.trade_date, close]);
+      state.dateSet.add(row.trade_date);
+      const turnover = Number(row.turnover);
+      if (Number.isFinite(turnover) && turnover > 0) {
+        const dayKey = row.trade_date;
+        state.turnover.set(dayKey, (state.turnover.get(dayKey) || 0) + turnover);
+        state.turnoverByTicker = state.turnoverByTicker || new Map();
+        const agg = state.turnoverByTicker.get(row.ticker) || [0, 0];
+        agg[0] += turnover; agg[1] += 1;
+        state.turnoverByTicker.set(row.ticker, agg);
+      }
+    }
+    for (const [ticker, series] of state.closes) {
+      series.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    }
+    const aggTurnover = new Map();
+    for (const [ticker, [sum, n]] of state.turnoverByTicker || []) aggTurnover.set(ticker, sum / n);
+    state.turnoverAvg = aggTurnover;
+
+    state.index = indexCsv
+      .filter((r) => r.index_id === "IMOEX")
+      .map((r) => [r.trade_date, Number(r.close)])
+      .filter(([, c]) => Number.isFinite(c) && c > 0)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+
+    state.turnoverSeries = [...state.dateSet].sort().map((d) => [d, (state.turnover.get(d) || 0) / 1e9]);
+
+    state.stats = buildStats();
+    state.stats.forEach((s) => { s.turnover = aggTurnover.get(s.ticker) || null; });
+
+    rebuildDateIndex();
+    const first = state.index[0][0], last = state.index[state.index.length - 1][0];
+    $("period").textContent = `Период ${first} — ${last} · бумаг ${state.stats.length} · данные из ISS Мосбиржи (TQBR)`;
+
+    renderKpis();
+    renderTickSelect();
+    renderTable();
+    drawChart();
+
+    $("tickers").addEventListener("change", (e) => {
+      state.selected = [...e.target.selectedOptions].map((o) => o.value).slice(0, 8);
+      drawChart();
+    });
+    $("sort").addEventListener("change", (e) => { state.sort = e.target.value; renderTable(); });
+    $("search").addEventListener("input", (e) => { state.search = e.target.value; renderTable(); });
+    document.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+      state.sort = th.dataset.sort;
+      $("sort").value = state.sort;
+      renderTable();
+    }));
+    document.querySelectorAll("#chart-tabs .tab").forEach((tab) => tab.addEventListener("click", () => {
+      state.chart = tab.dataset.chart;
+      document.querySelectorAll("#chart-tabs .tab").forEach((t) => t.setAttribute("aria-pressed", String(t === tab)));
+      $("nav-controls").style.display = state.chart === "nav" ? "" : "none";
+      drawChart();
+    }));
+    window.addEventListener("resize", drawChart);
+  } catch (err) {
+    $("period").innerHTML = `<span class="err">Не удалось загрузить данные: ${err.message}. Запустите дашборд через локальный HTTP-сервер (fetch не работает с file://).</span>`;
+  }
+}
+
+main();
+</script>
+</body>
+</html>

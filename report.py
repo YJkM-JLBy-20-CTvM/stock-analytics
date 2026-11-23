@@ -110,9 +110,12 @@ def chart_normalized(res: dict, index_id: str, top: int = 8) -> str:
     leaders = list(table.dropna(subset=["total_return"]).nlargest(top, "total_return")["ticker"])
     norm = metrics.window_returns(closes[leaders], closes.index[0], closes.index[-1])
     fig, ax = plt.subplots(figsize=(9, 4.2))
-    norm.plot(ax=ax, lw=1.2, cmap="tab10")
     idx = res["index"]
+    # pandas-график ставит свой конвертер дат, поэтому индекс рисуем первым, на чистой оси
     ax.plot(idx.index, idx / idx.iloc[0], color="black", ls="--", lw=1.8, label=index_id)
+    for name in norm.columns:
+        series = norm[name].dropna()
+        ax.plot(series.index, series, lw=1.2, label=name)
     ax.set_title(f"1 ₽ в начале периода — сколько к концу (пунктир: {index_id})")
     ax.set_ylabel("рост вложенной суммы")
     ax.legend(ncol=3, frameon=False, fontsize=8)
@@ -121,6 +124,8 @@ def chart_normalized(res: dict, index_id: str, top: int = 8) -> str:
 
 def chart_risk_return(table: pd.DataFrame) -> str:
     sub = table.dropna(subset=["total_return", "volatility"])
+    # фонды и паи на графике «бумага = точка» врут о волатильности: у них не тот ценовой ряд
+    sub = sub[~sub["ticker"].str.startswith("RU000")]
     fig, ax = plt.subplots(figsize=(8, 4.6))
     ax.scatter(sub["volatility"], sub["total_return"], s=28, alpha=0.75, color="#2b6cb0")
     for _, r in sub.nlargest(8, "total_return").iterrows():

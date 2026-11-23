@@ -16,8 +16,19 @@ from datetime import date
 from pathlib import Path
 
 BASE = "https://iss.moex.com/iss"
+# Официальный корневой сертификат Минцифры: без него Python не доверяет
+# цепочке ISS на машинах с российским TLS-прокси. Проверка TLS остаётся включённой.
+CA_BUNDLE = Path(__file__).with_name("certs") / "russian_trusted_root_ca.pem"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if CA_BUNDLE.exists():
+        context.load_verify_locations(cafile=str(CA_BUNDLE))
+    return context
+
 SHARES_PATH = "/engines/stock/markets/shares/boards/TQBR/securities"
-HISTORY_PATH = "/history" + SHARES_PATH
+TICKER_HISTORY_PATH = "/history/engines/stock/markets/shares/securities/{ticker}"
 INDEX_PATH = "/history/engines/stock/markets/index/securities/{index}"
 WEIGHTS_PATH = "/statistics/engines/stock/markets/index/analytics/{index}"
 PAGE = 100
@@ -34,7 +45,7 @@ def _get(path: str, **params) -> dict:
     for attempt in range(5):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "moex-market-report/1.0"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             # ISS периодически роняет TLS-цепочку и рвёт соединение: ждём дольше,
@@ -52,14 +63,17 @@ def _block(payload: dict, name: str) -> list[dict]:
 
 def _paginate(path: str, block: str, **params) -> list[dict]:
     rows: list[dict] = []
-    empty_pages = 0
-    while empty_pages < 2:
-        chunk = _block(_get(path, start=len(rows), limit=PAGE, **params), block)
-        if not chunk:
-            empty_pages += 1
-            continue
-        empty_pages = 0
-        rows.extend(chunk)
+    previous: list[dict] | None = None
+    while True:
+        page = _block(_get(path, start=len(rows), limit=PAGE, **params), block)
+        # ISS игнорирует start для справочника и отдаёт одну и ту же страницу:
+        # повтор страницы — единственный надёжный признак конца
+        if not page or page == previous:
+            break
+        rows.extend(page)
+        previous = page
+        if len(page) < PAGE:
+            break
     return rows
 
 
@@ -89,25 +103,27 @@ def fetch_universe() -> list[dict]:
 
 
 def fetch_daily(tickers: list[str], date_from: date, date_to: date) -> list[dict]:
-    wanted = {t.upper() for t in tickers}
-    rows = _paginate(HISTORY_PATH, "history", **{
-        "from": date_from.isoformat(), "till": date_to.isoformat(),
-        "history.columns": "SECID,TRADEDATE,CLOSE,LEGALCLOSEPRICE,OPEN,HIGH,LOW,VOLUME,VALUE,NUMTRADES",
-    })
+    """Дневная история одной бумаги: ISS не фильтрует by-борду по периоду, только по тикеру."""
     out = []
-    for r in rows:
-        secid = (r.get("SECID") or "").upper()
-        if secid not in wanted:
-            continue
-        close = num(r.get("CLOSE"))
-        if close is None:
-            close = num(r.get("LEGALCLOSEPRICE"))
-        out.append({
-            "ticker": secid, "trade_date": r.get("TRADEDATE"), "close": close,
-            "open": num(r.get("OPEN")), "high": num(r.get("HIGH")), "low": num(r.get("LOW")),
-            "volume": num(r.get("VOLUME")), "turnover": num(r.get("VALUE")),
-            "trades": num(r.get("NUMTRADES")),
+    for ticker in tickers:
+        path = TICKER_HISTORY_PATH.format(ticker=ticker)
+        rows = _paginate(path, "history", **{
+            "from": date_from.isoformat(), "till": date_to.isoformat(),
+            "history.columns": "SECID,TRADEDATE,CLOSE,LEGALCLOSEPRICE,OPEN,HIGH,LOW,VOLUME,VALUE,NUMTRADES",
         })
+        secid = ticker.upper()
+        for r in rows:
+            if (r.get("SECID") or secid).upper() != secid:
+                continue
+            close = num(r.get("CLOSE"))
+            if close is None:
+                close = num(r.get("LEGALCLOSEPRICE"))
+            out.append({
+                "ticker": secid, "trade_date": r.get("TRADEDATE"), "close": close,
+                "open": num(r.get("OPEN")), "high": num(r.get("HIGH")), "low": num(r.get("LOW")),
+                "volume": num(r.get("VOLUME")), "turnover": num(r.get("VALUE")),
+                "trades": num(r.get("NUMTRADES")),
+            })
     return out
 
 

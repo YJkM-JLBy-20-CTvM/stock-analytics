@@ -16,7 +16,8 @@ def test_fetch_daily_reads_history_endpoint(monkeypatch):
     seen = {}
 
     def fake_paginate(path, block, **params):
-        seen.update(path=path, block=block, params=params)
+        seen.setdefault("paths", []).append(path)
+        seen.update(block=block, params=params)
         return [
             {"SECID": "sber", "TRADEDATE": "2026-01-05", "CLOSE": "300,5", "OPEN": "299",
              "HIGH": "301", "LOW": "298", "VOLUME": "1 000", "VALUE": "300 500",
@@ -25,17 +26,37 @@ def test_fetch_daily_reads_history_endpoint(monkeypatch):
         ]
 
     monkeypatch.setattr(moex, "_paginate", fake_paginate)
-    rows = moex.fetch_daily(["SBER"], date(2026, 1, 1), date(2026, 1, 31))
+    rows = moex.fetch_daily(["SBER", "GAZP"], date(2026, 1, 1), date(2026, 1, 31))
 
-    assert seen["path"] == moex.HISTORY_PATH
-    assert seen["path"].startswith("/history/")
+    # ISS фильтрует историю только по тикеру, поэтому запрос на каждую бумагу
+    assert seen["paths"] == [
+        "/history/engines/stock/markets/shares/securities/SBER",
+        "/history/engines/stock/markets/shares/securities/GAZP",
+    ]
     assert seen["block"] == "history"
-    assert len(rows) == 1
+    assert seen["params"]["from"] == "2026-01-01"
+    assert len(rows) == 2
     row = rows[0]
     assert row["ticker"] == "SBER"
     assert row["close"] == pytest.approx(300.5)
     assert row["volume"] == pytest.approx(1000.0)
     assert row["turnover"] == pytest.approx(300500.0)
+    assert rows[1]["ticker"] == "GAZP"
+
+
+def test_paginate_stops_when_iss_repeats_page(monkeypatch):
+    calls = []
+
+    def fake_get(path, **params):
+        calls.append(params["start"])
+        # ISS игнорирует start и возвращает полную страницу заново
+        return {"history": {"columns": ["SECID"], "data": [["A"]] * moex.PAGE}}
+
+    monkeypatch.setattr(moex, "_get", fake_get)
+    rows = moex._paginate("/history/x", "history")
+
+    assert len(calls) == 2
+    assert len(rows) == moex.PAGE
 
 
 def test_fetch_daily_falls_back_to_legal_close(monkeypatch):
@@ -66,6 +87,18 @@ def test_upsert_is_idempotent(tmp_path):
 
     count, close = con.execute("SELECT count(*), max(close) FROM prices").fetchone()
     assert (count, close) == (1, 3.0)
+
+
+def test_upsert_survives_duplicate_rows_in_one_batch(tmp_path):
+    con = ingest.connect(tmp_path / "test.duckdb")
+    row = {"ticker": "ABIO", "trade_date": date(2025, 11, 20), "open": 1.0, "high": 2.0,
+           "low": 1.0, "close": 2.0, "volume": 100.0, "turnover": 200.0, "trades": 5.0}
+
+    # ISS может отдать одну и ту же дату дважды — INSERT не должен падать на ключе
+    ingest._upsert(con, "prices", ingest.PRICE_COLUMNS, [row, dict(row, close=9.0)])
+
+    count, close = con.execute("SELECT count(*), max(close) FROM prices").fetchone()
+    assert (count, close) == (1, 9.0)
 
 
 def test_window_returns_do_not_backfill_short_history():

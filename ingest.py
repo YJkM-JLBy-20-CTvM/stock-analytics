@@ -79,9 +79,6 @@ def _upsert(con, table: str, columns: list[str], rows: list[dict]) -> int:
     if not rows:
         return 0
     frame = pd.DataFrame([{c: r.get(c) for c in columns} for r in rows], columns=columns)
-    tmp = f"stg_{table}"
-    con.register("_stg", frame)
-    con.execute(f"CREATE OR REPLACE TEMP TABLE {tmp} AS SELECT * FROM _stg")
     keys = {
         "securities": ["ticker"],
         "prices": ["ticker", "trade_date"],
@@ -89,6 +86,14 @@ def _upsert(con, table: str, columns: list[str], rows: list[dict]) -> int:
         "index_weights": ["index_id", "weight_date", "ticker"],
         "fx_rates": ["currency", "rate_date"],
     }[table]
+    # одна и та же дата может прийти дважды (дубль в ответе ISS или выходной день):
+    # без drop_duplicates INSERT падает на первичном ключе
+    frame = frame.drop_duplicates(subset=keys, keep="last")
+    if frame.empty:
+        return 0
+    tmp = f"stg_{table}"
+    con.register("_stg", frame)
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {tmp} AS SELECT * FROM _stg")
     on = " AND ".join(f"t.{k} = s.{k}" for k in keys)
     con.execute(f"DELETE FROM {table} AS t USING {tmp} AS s WHERE {on}")
     con.execute(f"INSERT INTO {table} ({', '.join(columns)}) SELECT {', '.join(columns)} FROM {tmp}")
